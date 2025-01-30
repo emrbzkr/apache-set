@@ -1,0 +1,202 @@
+services:
+  # PostgreSQL Database for Superset
+  db:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=superset
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.10
+
+  # Redis for Superset caching
+  redis:
+    image: redis:latest
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.11
+
+  # Apache Superset
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    container_name: superset
+    depends_on:
+      - db
+      - redis
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_EMAIL: admin@superset.com
+      ADMIN_PASSWORD: admin
+      REDIS_HOST: redis
+      SQLALCHEMY_DATABASE_URI: "postgresql://postgres:postgres@db:5432/superset"
+      COMPOSE_PROJECT_NAME: superset
+      PYTHONPATH: /app/pythonpath:/app/docker/pythonpath_dev
+      FLASK_DEBUG: true
+      SUPERSET_ENV: development
+      SUPERSET_LOAD_EXAMPLES: yes
+      CYPRESS_CONFIG: false
+      SUPERSET_PORT: 8088
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/superset-init.sh:/superset-init.sh
+      - ./superset/superset_config.py:/app/superset_config.py
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.12
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.13
+
+  # Apache Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.8.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://172.21.80.14:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.14
+
+  # Apache Flink JobManager
+  jobmanager:
+    image: flink:latest
+    container_name: flink-jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+        rest.port: 8082
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+    command: jobmanager
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.15
+
+  # Apache Flink TaskManager
+  taskmanager:
+    image: flink:latest
+    container_name: flink-taskmanager
+    depends_on:
+      - jobmanager
+    environment:
+      FLINK_PROPERTIES: "jobmanager.rpc.address: jobmanager"
+    command: taskmanager
+    restart: always
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.16
+
+  # Apache Doris Frontend (FE)
+  dorisfe:
+    image: apache/doris:2.0.0_alpha-fe-x86_64
+    hostname: dorisfe
+    container_name: dorisfe
+    environment:
+      FE_SERVERS: fe1:172.21.80.17:9010
+      FE_ID: 1
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    restart: always
+    volumes:
+      - doris-fe-doris-meta:/opt/apache-doris/fe/doris-meta/
+      - doris-fe-log:/opt/apache-doris/fe/log/
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.17
+
+  # Apache Doris Backend (BE)
+  dorisbe:
+    image: apache/doris:2.0.0_alpha-be-x86_64
+    hostname: dorisbe
+    container_name: dorisbe
+    depends_on:
+      - dorisfe
+    environment:
+      FE_SERVERS: fe1:172.21.80.17:9010
+      BE_ADDR: "172.21.80.18:9050"
+    ports:
+      - "8040:8040"
+    restart: always
+    volumes:
+      - doris-be-storage:/opt/apache-doris/be/storage/
+      - doris-be-script:/docker-entrypoint-initdb.d/
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.18
+
+  # Apache NiFi
+  nifi:
+    image: apache/nifi:2.1.0
+    container_name: nifi
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      NIFI_WEB_HTTP_PORT: 8080
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: admin123456789
+    restart: always
+    user: 0:0
+    networks:
+      apache_net:
+        ipv4_address: 172.21.80.19
+    volumes:
+      - nifi-volume:/opt/nifi/nifi-current/ls-target
+      - ./nifi/bootstrap.conf:/opt/nifi/nifi-current/conf/bootstrap.conf
+      - ./nifi/postgresql-42.7.3.jar:/opt/nifi/nifi-current/postgresql-driver/postgresql-42.7.3.jar
+
+volumes:
+  postgres_data:
+  superset_home:
+  doris-be-storage:
+  doris-be-script:
+  doris-fe-doris-meta:
+  doris-fe-log:
+  nifi-volume:
+
+networks:
+  apache_net:
+    ipam:
+      config:
+        - subnet: 172.21.80.0/24
